@@ -1,0 +1,11 @@
+# Add requirements for s4e11: scikit-learn, pandas, numpy, matplotlib, seaborn, xgboost, catboost, lightgbm, optuna
+
+scikit-learn
+pandas
+numpy
+matplotlib
+seaborn
+xgboost
+catboost
+lightgbm
+optuna
