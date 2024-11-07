@@ -8,8 +8,9 @@ import seaborn as sns
 
 # Suppress warnings
 import warnings
-warnings.filterwarnings('ignore', category=UndefinedMetricWarning)
-warnings.filterwarnings('ignore', category=UserWarning)
+
+warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # Sklearn components
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -23,7 +24,7 @@ from sklearn.metrics import (
     confusion_matrix,
     roc_curve,
     precision_recall_curve,
-    auc
+    auc,
 )
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
@@ -36,13 +37,13 @@ import optuna.visualization
 from functools import partial
 
 # Set basic configurations
-plt.style.use('seaborn')
-pd.set_option('display.max_columns', None)
-pd.set_option('display.width', None)
-sns.set_style('whitegrid')
+plt.style.use("seaborn")
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+sns.set_style("whitegrid")
 
 # Configure warnings for LightGBM
-lgb.basic.LightGBMError = type('LightGBMError', (Exception,), {})
+lgb.basic.LightGBMError = type("LightGBMError", (Exception,), {})
 
 
 class SleepDurationTransformer(BaseEstimator, TransformerMixin):
@@ -271,10 +272,12 @@ def validate_and_transform_data(X_train, y_train, X_test=None, min_count=100):
     return X_train_transformed, y_train_filtered, preprocessor
 
 
-def optimize_xgboost_with_optuna(X_train, y_train, n_trials=100, use_previous_best=True):
+def optimize_xgboost_with_optuna(
+    X_train, y_train, n_trials=100, use_previous_best=True
+):
     """
     Optimize XGBoost hyperparameters using Optuna for imbalanced binary classification.
-    
+
     Args:
         X_train: Training features
         y_train: Training labels
@@ -283,122 +286,138 @@ def optimize_xgboost_with_optuna(X_train, y_train, n_trials=100, use_previous_be
     """
     # Define known best parameters
     BEST_PARAMS = {
-        'learning_rate': 0.053586264512840626,
-        'n_estimators': 684,
-        'max_depth': 5,
-        'min_child_weight': 3.5819104187316104,
-        'subsample': 0.7176744310587686,
-        'colsample_bytree': 0.34278124480479555,
-        'colsample_bylevel': 0.8519453146528222,
-        'colsample_bynode': 0.9677853695964237,
-        'reg_alpha': 5.204618698507569,
-        'reg_lambda': 2.74786117067469
+        "learning_rate": 0.053586264512840626,
+        "n_estimators": 684,
+        "max_depth": 5,
+        "min_child_weight": 3.5819104187316104,
+        "subsample": 0.7176744310587686,
+        "colsample_bytree": 0.34278124480479555,
+        "colsample_bylevel": 0.8519453146528222,
+        "colsample_bynode": 0.9677853695964237,
+        "reg_alpha": 5.204618698507569,
+        "reg_lambda": 2.74786117067469,
     }
-    
+
     def suggest_params(trial, previous_best=None):
         """Define parameter search space with optimal bounds."""
         params = {}
-        
+
         # Learning rate: Allow 50% variation around previous best
         if previous_best:
-            lr_low = previous_best['learning_rate'] * 0.5
-            lr_high = previous_best['learning_rate'] * 1.5
+            lr_low = previous_best["learning_rate"] * 0.5
+            lr_high = previous_best["learning_rate"] * 1.5
         else:
             lr_low, lr_high = 1e-3, 0.3
-        params['learning_rate'] = trial.suggest_float('learning_rate', lr_low, lr_high, log=True)
-        
+        params["learning_rate"] = trial.suggest_float(
+            "learning_rate", lr_low, lr_high, log=True
+        )
+
         # Number of estimators: Allow 20% variation
         if previous_best:
-            n_est_low = max(100, int(previous_best['n_estimators'] * 0.8))
-            n_est_high = min(1000, int(previous_best['n_estimators'] * 1.2))
+            n_est_low = max(100, int(previous_best["n_estimators"] * 0.8))
+            n_est_high = min(1000, int(previous_best["n_estimators"] * 1.2))
         else:
             n_est_low, n_est_high = 100, 1000
-        params['n_estimators'] = trial.suggest_int('n_estimators', n_est_low, n_est_high)
-        
+        params["n_estimators"] = trial.suggest_int(
+            "n_estimators", n_est_low, n_est_high
+        )
+
         # Max depth: Plus/minus 1 from previous best
         if previous_best:
-            depth_low = max(3, previous_best['max_depth'] - 1)
-            depth_high = min(10, previous_best['max_depth'] + 1)
+            depth_low = max(3, previous_best["max_depth"] - 1)
+            depth_high = min(10, previous_best["max_depth"] + 1)
         else:
             depth_low, depth_high = 3, 10
-        params['max_depth'] = trial.suggest_int('max_depth', depth_low, depth_high)
-        
+        params["max_depth"] = trial.suggest_int("max_depth", depth_low, depth_high)
+
         # Min child weight: Allow 20% variation
         if previous_best:
-            mcw_low = max(1, previous_best['min_child_weight'] * 0.8)
-            mcw_high = previous_best['min_child_weight'] * 1.2
+            mcw_low = max(1, previous_best["min_child_weight"] * 0.8)
+            mcw_high = previous_best["min_child_weight"] * 1.2
         else:
             mcw_low, mcw_high = 1, 10
-        params['min_child_weight'] = trial.suggest_float('min_child_weight', mcw_low, mcw_high)
-        
+        params["min_child_weight"] = trial.suggest_float(
+            "min_child_weight", mcw_low, mcw_high
+        )
+
         # Sampling parameters: Handle 0-1 bounded parameters carefully
-        for param_name in ['subsample', 'colsample_bytree', 'colsample_bylevel', 'colsample_bynode']:
+        for param_name in [
+            "subsample",
+            "colsample_bytree",
+            "colsample_bylevel",
+            "colsample_bynode",
+        ]:
             if previous_best:
                 param_low = max(0.3, min(1.0, previous_best[param_name] * 0.8))
                 param_high = min(1.0, previous_best[param_name] * 1.2)
             else:
                 param_low, param_high = 0.3, 1.0
             params[param_name] = trial.suggest_float(param_name, param_low, param_high)
-        
+
         # Regularization parameters: Allow 50% variation
-        for param_name in ['reg_alpha', 'reg_lambda']:
+        for param_name in ["reg_alpha", "reg_lambda"]:
             if previous_best:
                 reg_low = previous_best[param_name] * 0.5
                 reg_high = previous_best[param_name] * 1.5
             else:
                 reg_low, reg_high = 1e-8, 10.0
-            params[param_name] = trial.suggest_float(param_name, reg_low, reg_high, log=True)
-        
+            params[param_name] = trial.suggest_float(
+                param_name, reg_low, reg_high, log=True
+            )
+
         return params
 
     def objective(trial, X_train, y_train, previous_best=None):
         # Get suggested parameters
         params = suggest_params(trial, previous_best)
-        
+
         # Add fixed parameters
-        params.update({
-            'objective': 'binary:logistic',
-            'tree_method': 'hist',
-            'random_state': 42,
-            'eval_metric': ['aucpr', 'auc'],
-            'scale_pos_weight': sum(y_train == 0) / sum(y_train == 1)
-        })
-        
+        params.update(
+            {
+                "objective": "binary:logistic",
+                "tree_method": "hist",
+                "random_state": 42,
+                "eval_metric": ["aucpr", "auc"],
+                "scale_pos_weight": sum(y_train == 0) / sum(y_train == 1),
+            }
+        )
+
         # Cross-validation setup
         skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        scores = {metric: [] for metric in ['ap', 'auc', 'f1']}
-        
+        scores = {metric: [] for metric in ["ap", "auc", "f1"]}
+
         for train_idx, val_idx in skf.split(X_train, y_train):
             X_fold_train = X_train.iloc[train_idx]
             y_fold_train = y_train.iloc[train_idx]
             X_fold_val = X_train.iloc[val_idx]
             y_fold_val = y_train.iloc[val_idx]
-            
+
             # Train model
             model = xgb.XGBClassifier(**params)
             model.fit(
-                X_fold_train, y_fold_train,
+                X_fold_train,
+                y_fold_train,
                 eval_set=[(X_fold_val, y_fold_val)],
-                verbose=False
+                verbose=False,
             )
-            
+
             # Make predictions
             y_pred_proba = model.predict_proba(X_fold_val)[:, 1]
             y_pred = (y_pred_proba >= 0.5).astype(int)
-            
+
             # Calculate metrics
-            scores['ap'].append(average_precision_score(y_fold_val, y_pred_proba))
-            scores['auc'].append(roc_auc_score(y_fold_val, y_pred_proba))
-            scores['f1'].append(f1_score(y_fold_val, y_pred))
-        
+            scores["ap"].append(average_precision_score(y_fold_val, y_pred_proba))
+            scores["auc"].append(roc_auc_score(y_fold_val, y_pred_proba))
+            scores["f1"].append(f1_score(y_fold_val, y_pred))
+
         # Calculate mean scores
         mean_scores = {k: np.mean(v) for k, v in scores.items()}
-        
+
         # Store all metrics in trial
         for metric, value in mean_scores.items():
-            trial.set_user_attr(f'{metric}_score', value)
-        
-        return mean_scores['ap']
+            trial.set_user_attr(f"{metric}_score", value)
+
+        return mean_scores["ap"]
 
     # Create study
     study = optuna.create_study(
@@ -406,54 +425,52 @@ def optimize_xgboost_with_optuna(X_train, y_train, n_trials=100, use_previous_be
         study_name="xgboost_optimization",
         sampler=optuna.samplers.TPESampler(seed=42),
         pruner=optuna.pruners.MedianPruner(
-            n_startup_trials=5,
-            n_warmup_steps=5,
-            interval_steps=1
-        )
+            n_startup_trials=5, n_warmup_steps=5, interval_steps=1
+        ),
     )
-    
+
     # Optimize
     objective_func = partial(
-        objective, 
-        X_train=X_train, 
+        objective,
+        X_train=X_train,
         y_train=y_train,
-        previous_best=BEST_PARAMS if use_previous_best else None
+        previous_best=BEST_PARAMS if use_previous_best else None,
     )
-    
+
     study.optimize(
         objective_func,
         n_trials=n_trials,
         show_progress_bar=True,
-        callbacks=[lambda study, trial: print(f"Trial {trial.number}: AP={trial.value:.4f}")]
+        callbacks=[
+            lambda study, trial: print(f"Trial {trial.number}: AP={trial.value:.4f}")
+        ],
     )
-    
+
     # Print results
     print("\nBest trial:")
     trial = study.best_trial
-    for metric in ['ap', 'auc', 'f1']:
+    for metric in ["ap", "auc", "f1"]:
         print(f"  {metric.upper()} Score: {trial.user_attrs[f'{metric}_score']:.4f}")
-    
+
     print("\nBest hyperparameters:")
     for key, value in trial.params.items():
         print(f"  {key}: {value}")
-    
+
     # Train final model with best parameters
     best_params = study.best_params
-    best_params.update({
-        'objective': 'binary:logistic',
-        'tree_method': 'hist',
-        'eval_metric': ['aucpr', 'auc'],
-        'random_state': 42,
-        'scale_pos_weight': sum(y_train == 0) / sum(y_train == 1)
-    })
-    
-    final_model = xgb.XGBClassifier(**best_params)
-    final_model.fit(
-        X_train, y_train,
-        eval_set=[(X_train, y_train)],
-        verbose=False
+    best_params.update(
+        {
+            "objective": "binary:logistic",
+            "tree_method": "hist",
+            "eval_metric": ["aucpr", "auc"],
+            "random_state": 42,
+            "scale_pos_weight": sum(y_train == 0) / sum(y_train == 1),
+        }
     )
-    
+
+    final_model = xgb.XGBClassifier(**best_params)
+    final_model.fit(X_train, y_train, eval_set=[(X_train, y_train)], verbose=False)
+
     return final_model, study
 
 
@@ -461,63 +478,63 @@ def evaluate_imbalanced_model(model, X, y, threshold=0.5):
     """
     Evaluate model performance with metrics suitable for imbalanced classification.
     """
-    
+
     # Get predictions
     y_pred_proba = model.predict_proba(X)[:, 1]
     y_pred = (y_pred_proba >= threshold).astype(int)
-    
+
     # Print classification report
     print("\nClassification Report:")
     print(classification_report(y, y_pred))
-    
+
     # Plot confusion matrix
     plt.figure(figsize=(8, 6))
     cm = confusion_matrix(y, y_pred)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.title('Confusion Matrix')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title("Confusion Matrix")
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
     plt.savefig("plots/confusion_matrix.png")
-    
+
     # Plot ROC curve
     plt.figure(figsize=(8, 6))
     fpr, tpr, _ = roc_curve(y, y_pred_proba)
     roc_auc = auc(fpr, tpr)
-    plt.plot(fpr, tpr, label=f'ROC curve (AUC = {roc_auc:.2f})')
-    plt.plot([0, 1], [0, 1], 'k--')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC Curve')
+    plt.plot(fpr, tpr, label=f"ROC curve (AUC = {roc_auc:.2f})")
+    plt.plot([0, 1], [0, 1], "k--")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
     plt.legend()
     plt.savefig("plots/roc_curve.png")
-    
+
     # Plot Precision-Recall curve
     plt.figure(figsize=(8, 6))
     precision, recall, _ = precision_recall_curve(y, y_pred_proba)
     pr_auc = auc(recall, precision)
-    plt.plot(recall, precision, label=f'PR curve (AUC = {pr_auc:.2f})')
-    plt.xlabel('Recall')
-    plt.ylabel('Precision')
-    plt.title('Precision-Recall Curve')
+    plt.plot(recall, precision, label=f"PR curve (AUC = {pr_auc:.2f})")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title("Precision-Recall Curve")
     plt.legend()
     plt.savefig("plots/pr_curve.png")
-    
+
     # Feature importance plot
-    feature_importance = pd.DataFrame({
-        'feature': X.columns,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
-    
+    feature_importance = pd.DataFrame(
+        {"feature": X.columns, "importance": model.feature_importances_}
+    ).sort_values("importance", ascending=False)
+
     plt.figure(figsize=(12, 6))
-    sns.barplot(data=feature_importance.head(20), x='importance', y='feature')
-    plt.title('Top 20 Feature Importance')
+    sns.barplot(data=feature_importance.head(20), x="importance", y="feature")
+    plt.title("Top 20 Feature Importance")
     plt.savefig("plots/feature_importance.png")
-    
+
     return {
-        'roc_auc': roc_auc,
-        'pr_auc': pr_auc,
-        'feature_importance': feature_importance
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
+        "feature_importance": feature_importance,
     }
+
 
 def create_submission_file(model, test_data, test_ids):
     """Create a submission file."""
@@ -625,21 +642,24 @@ def main():
 
     # Optimize hyperparameters using Optuna
     best_model, study = optimize_xgboost_with_optuna(
-        X_train_transformed, 
+        X_train_transformed,
         y_train_filtered,
-        n_trials=100  # Adjust based on your computational budget
+        n_trials=100,  # Adjust based on your computational budget
     )
-    
-        # Create submission
+
+    # Create submission
     create_submission_file(best_model, X_test_transformed, test_ids)
-    
+
     # Evaluate the model
-    results = evaluate_imbalanced_model(best_model, X_train_transformed, y_train_filtered)    
+    results = evaluate_imbalanced_model(
+        best_model, X_train_transformed, y_train_filtered
+    )
     # Save study results
     study_results = pd.DataFrame()
-    study_results['value'] = [trial.value for trial in study.trials]
-    study_results['params'] = [trial.params for trial in study.trials]
-    study_results.to_csv('optuna_study_results.csv')
+    study_results["value"] = [trial.value for trial in study.trials]
+    study_results["params"] = [trial.params for trial in study.trials]
+    study_results.to_csv("optuna_study_results.csv")
+
 
 if __name__ == "__main__":
     main()
