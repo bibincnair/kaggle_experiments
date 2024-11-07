@@ -3,3 +3,9 @@
 
 # Ignore PNG files
 *.png
+
+
+# Add data logs and plots to .gitignore
+data/
+plots/
+logs/
