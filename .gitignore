@@ -9,3 +9,8 @@
 data/
 plots/
 logs/
+
+# Catboost model files and logs
+catboost_info/
+catboost_models/
+models/
