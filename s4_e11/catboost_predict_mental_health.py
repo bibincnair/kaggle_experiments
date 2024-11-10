@@ -22,7 +22,9 @@ from sklearn.metrics import confusion_matrix, classification_report, roc_curve, 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.experimental import enable_iterative_imputer
+from clearml import Task
 
+task = Task.init(project_name="s4e11", task_name="catboost_predict_mental_health")
 
 def load_data():
     """Load data from data/s4_e11 folder, train.csv and test.csv"""
@@ -228,7 +230,6 @@ def preprocess_numerical_columns(X_train, X_test):
 
 def preprocess_data(X_train, y_train, X_test):
     """Preprocess data"""
-    print(f"Nan count before transformation:\n{X_train.isna().sum()}")
     # Drop Name column
     X_train = X_train.drop("Name", axis=1)
     X_test = X_test.drop("Name", axis=1)
@@ -291,16 +292,21 @@ def train_model(X_train, y_train, params=None, fold_count=5, model_init=None):
     if "loss_function" not in params:
         params["loss_function"] = "Logloss"
     if "eval_metric" not in params:
-        params["eval_metric"] = "Accuracy"
+        params["eval_metric"] = "AUC"
 
-    # Get categorical feature indices
-    cat_features = [
-        i for i, col in enumerate(X_train.columns) if X_train[col].dtype == "object"
-    ]
-
-    # Create CatBoost pool with categorical features
-    train_pool = Pool(X_train, y_train, cat_features=cat_features)
+    train_pool = Pool(X_train, y_train, thread_count=-1)
     # params["loss_function"] = "Logloss"
+    # Custom callback for logging metrics
+    def log_metrics(iteration, train_metrics, eval_metrics):
+        for metric, value in eval_metrics.items():
+            task.get_logger().report_scalar(
+                "per_iteration_metrics", metric, value, iteration
+            )
+        if train_metrics:
+            for metric, value in train_metrics.items():
+                task.get_logger().report_scalar(
+                    "per_iteration_train_metrics", metric, value, iteration
+                )
 
     # Perform stratified cross-validation
     cv_results = cv(
@@ -310,18 +316,28 @@ def train_model(X_train, y_train, params=None, fold_count=5, model_init=None):
         stratified=True,
         shuffle=True,
         seed=42,
-        verbose=10,
+        verbose=False,
     )
 
     # Log CV results
     mean_auc = np.mean(cv_results["test-AUC-mean"])
     std_auc = np.std(cv_results["test-AUC-mean"])
     print(f"CV AUC: {mean_auc:.4f} ± {std_auc:.4f}")
+    task.get_logger().report_scalar("cv_results", "mean_auc", mean_auc, 0)
+    task.get_logger().report_scalar("cv_results", "std_auc", std_auc, 0)
+
+    # Log detailed CV results
+    for i, metric in enumerate(cv_results.keys()):
+        if metric.startswith("test-"):
+            mean_value = np.mean(cv_results[metric])
+            std_value = np.std(cv_results[metric])
+            task.get_logger().report_scalar("cv_detailed_results", f"{metric}_mean", mean_value, i)
+            task.get_logger().report_scalar("cv_detailed_results", f"{metric}_std", std_value, i)
 
     # Train final model on full dataset
     final_model = CatBoostClassifier(**params)
     final_model.fit(
-        X_train, y_train, cat_features=cat_features, verbose=10, init_model=model_init
+        X_train, y_train,verbose=False, init_model=model_init, callbacks=[log_metrics]
     )
 
     return final_model, cv_results
@@ -366,9 +382,9 @@ def optimize_hyperparameters(X_train, y_train, n_trials=100):
             # Hyperparameters to tune
             params = {
                 "learning_rate": trial.suggest_float(
-                    "learning_rate", 0.001, 0.3, log=True
+                    "learning_rate", 0.01, 0.3, log=True
                 ),
-                "depth": trial.suggest_int("depth", 4, 10),
+                "depth": trial.suggest_int("depth", 4, 12),
                 "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 0.1, 10, log=True),
                 "bootstrap_type": trial.suggest_categorical(
                     "bootstrap_type", ["Bayesian", "Bernoulli", "MVS"]
@@ -379,10 +395,10 @@ def optimize_hyperparameters(X_train, y_train, n_trials=100):
                 "grow_policy": trial.suggest_categorical(
                     "grow_policy", ["SymmetricTree", "Depthwise", "Lossguide"]
                 ),
-                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 50),
+                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 500),
                 "iterations": trial.suggest_int("iterations", 100, 2000),
                 "loss_function": "Logloss",
-                "eval_metric": "Accuracy",
+                "eval_metric": "AUC",
             }
 
             # Conditional parameters for bootstrap_type
@@ -391,14 +407,14 @@ def optimize_hyperparameters(X_train, y_train, n_trials=100):
                     "bagging_temperature", 0.0, 10.0
                 )
             elif params["bootstrap_type"] == "Bernoulli":
-                params["subsample"] = trial.suggest_float("subsample", 0.1, 1.0)
+                params["subsample"] = trial.suggest_float("subsample", 0.01, 1.0)
 
             # Conditional parameters for grow_policy
-            if params["grow_policy"] in ["Depthwise", "Lossguide"]:
+            if params["grow_policy"] in ["Lossguide"]:
                 params["score_function"] = trial.suggest_categorical(
                     "score_function", ["Cosine", "L2"]
                 )
-                params["max_leaves"] = trial.suggest_int("max_leaves", 10, 64)
+                params["max_leaves"] = trial.suggest_int("max_leaves", 4, 64)
 
             # Create CatBoost Pool
             train_pool = Pool(
@@ -419,7 +435,7 @@ def optimize_hyperparameters(X_train, y_train, n_trials=100):
             )
 
             # Get the best score
-            best_score = cv_results["test-Accuracy-mean"].max()
+            best_score = cv_results["test-AUC-mean"].max()
 
             # Enable pruning
             trial.report(best_score, step=params["iterations"])
@@ -445,7 +461,7 @@ def optimize_hyperparameters(X_train, y_train, n_trials=100):
         study_name="catboost_optimization",
     )
 
-    study.optimize(objective, n_trials=n_trials, timeout=3600)  # 1-hour timeout
+    study.optimize(objective, n_trials=n_trials)#, timeout=3600)  # 1-hour timeout
 
     print("\nBest trial:")
     print(f"  Value: {study.best_trial.value:.4f}")
@@ -602,33 +618,30 @@ def main():
     test_id = X_test["id"]
     X_original, y_original = load_original_data()
     # eda(X_original, y_original)
-    print_work_student_profession_nan(X_train, y=y_train)
-    compare_train_test_categorical_features(X_train, X_test)
+    # print_work_student_profession_nan(X_train, y=y_train)
+    # compare_train_test_categorical_features(X_train, X_test)
     X_train, y_train, X_test = preprocess_data(X_train, y_train, X_test)
-    # Print NaN in train and test data
-    print("NaN count in train data:")
-    print(X_train.isna().sum())
-    print("NaN count in test data:")
-    print(y_train.isna().sum())
-    # Print data types
-    print(X_train.dtypes)
+    print(f"################Finished preprocessing data#######################")
     # Print categorical columns
     cat_columns = X_train.select_dtypes(include=["object"]).columns
-    print(f"Categorical columns: {cat_columns}")
-
     # eda(X_train, y_train)
     # Train model
     model, cv_results = train_model(X_train, y_train)
+    print(f"################Finished training model#######################")
     # Evaluate model
     metrics, cv_results = evaluate_model(X_train, y_train, model)
+    print(f"################Finished evaluating model#######################")
     print(f"Model evaluation metrics:\n{metrics}")
     create_submission_file(X_test, model, test_id, filename="submission_default.csv")
+    print(f"################Finished creating submission file#######################")
     # Optimize hyperparameters
     best_params, best_value = optimize_hyperparameters(X_train, y_train)
+    print(f"################Finished optimizing hyperparameters#######################")
     print(f"Best hyperparameters: {best_params}")
     print(f"Best AUC value: {best_value}")
     # Train model with best hyperparameters
     best_model, _ = train_model(X_train, y_train, params=best_params)
+    print(f"################Finished training best model#######################")
     # Evaluate best model
     best_metrics, _ = evaluate_model(X_train, y_train, best_model)
     print(f"Best model evaluation metrics:\n{best_metrics}")
