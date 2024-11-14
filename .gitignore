@@ -14,3 +14,10 @@ logs/
 catboost_info/
 catboost_models/
 models/
+
+# nn files
+events.out.tfevents.*
+.pt_temp/*
+hparams.yaml
+*.ckpt
+*.yml
