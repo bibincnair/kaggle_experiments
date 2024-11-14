@@ -9,7 +9,7 @@ import optuna
 import lightgbm as lgb
 from lightgbm import LGBMClassifier
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer, KNNImputer
@@ -39,6 +39,13 @@ class MentalHealthClassifier:
         X_original = original_data.drop("Depression", axis=1)
         y_original = original_data["Depression"]
         return X_original, y_original
+    
+    def load_processed_data(self):
+        """Load processed data from data/s4_e11 folder"""
+        X_train = pd.read_pickle("data/s4_e11/X_train.pkl")
+        y_train = pd.read_pickle("data/s4_e11/y_train.pkl")
+        X_test = pd.read_pickle("data/s4_e11/X_test.pkl")
+        return X_train, y_train, X_test
 
     # Preprocessing transformers (same as in the original code)
     class CategoricalProcessor(BaseEstimator, TransformerMixin):
@@ -196,6 +203,9 @@ class MentalHealthClassifier:
 
     def preprocess_data(self, X_train, y_train, X_test):
         """Preprocess data"""
+        # Save train and test IDs
+        train_id = pd.DataFrame(X_train["id"])
+        test_id = pd.DataFrame(X_test["id"])
         # Drop 'Name' and 'id' columns
         X_train = X_train.drop(["Name", "id"], axis=1)
         X_test = X_test.drop(["Name", "id"], axis=1)
@@ -216,7 +226,14 @@ class MentalHealthClassifier:
 
         # Preprocess numerical columns
         X_train, X_test = self.preprocess_numerical_columns(X_train, X_test)
-
+        
+        # pickle processed data to data/s4_e11 folder
+        X_train.to_pickle("data/s4_e11/processed_data/X_train.pkl")
+        y_train.to_pickle("data/s4_e11/processed_data/y_train.pkl")
+        X_test.to_pickle("data/s4_e11/processed_data/X_test.pkl")
+        # Save ids
+        train_id.to_pickle("data/s4_e11/processed_data/train_id.pkl")
+        test_id.to_pickle("data/s4_e11/processed_data/test_id.pkl")
         return X_train, y_train, X_test
 
     def train_model(self, X_train, y_train, params=None, fold_count=5):
@@ -224,34 +241,45 @@ class MentalHealthClassifier:
         if params is None:
             params = self.best_params if self.best_params else {}
 
-        params.update(
-            {
-                "objective": "binary",
-                "metric": "auc",
-                "verbose": -1,
-            }
-        )
-        cv = StratifiedKFold(n_splits=fold_count, shuffle=True, random_state=42)
+        params.update({
+            "objective": "binary",
+            "metric": "auc",
+            "verbose": -1,
+            # "early_stopping_round": 50,
+        })
+
+        dataset = lgb.Dataset(X_train, label=y_train)
         cv_results = lgb.cv(
             params,
-            lgb.Dataset(X_train, label=y_train),
+            dataset,
+            stratified=True,
+            nfold=fold_count,
             num_boost_round=1000,
-            folds=cv,
-            verbose_eval=False,
+            shuffle=True,
+            seed=42,
+            return_cvbooster=False,
         )
 
-        best_num_rounds = len(cv_results["auc-mean"])
-        mean_auc = cv_results["auc-mean"][-1]
-        std_auc = cv_results["auc-stdv"][-1]
-
+        mean_auc = cv_results["valid auc-mean"][-1]
+        std_auc = cv_results["valid auc-stdv"][-1]
         print(f"CV AUC: {mean_auc:.4f} ± {std_auc:.4f}")
-
-        # Train final model on full dataset
-        self.model = lgb.LGBMClassifier(**params, n_estimators=best_num_rounds)
-        self.model.fit(X_train, y_train)
-
+        
+        # Check if early stopping is enabled, if so provide validation set and eval metric
+        if "early_stopping_round" in params:
+            # Train final model on full dataset
+            self.model = lgb.LGBMClassifier(**params)
+            X_tr, X_val, y_tr, y_val = train_test_split(X_train, y_train, test_size=0.2, stratify=y_train, random_state=42)
+            
+            self.model.fit(
+                X_tr, y_tr,
+                eval_set=[(X_val, y_val)],
+                eval_metric="auc",
+            )
+        else:
+            self.model = lgb.LGBMClassifier(**params)
+            self.model.fit(X_train, y_train)
         return self.model
-
+    
     def evaluate_model(self, X_train, y_train):
         """Evaluate model performance with cross-validation and metrics"""
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -272,16 +300,34 @@ class MentalHealthClassifier:
 
     def optimize_hyperparameters(self, X_train, y_train, n_trials=100):
         """Optimize hyperparameters using Optuna for LightGBM"""
+        initial_params = {
+            'learning_rate': 0.032832498290837335,
+            'n_estimators': 1938,
+            'num_leaves': 39,
+            'max_depth': 14,
+            'min_child_samples': 77,
+            'subsample': 0.7891781484238849,
+            'colsample_bytree': 0.7229807857262475,
+            'reg_alpha': 3.755034962683313e-05,
+            'reg_lambda': 8.62382802975515e-06,
+            'min_split_gain': 4.598158157234433e-06,
+            'early_stopping_round': 60
+        }
 
         def objective(trial):
             param_grid = {
                 "learning_rate": trial.suggest_float(
                     "learning_rate", 1e-3, 0.1, log=True
                 ),
-                "n_estimators": trial.suggest_int("n_estimators", 100, 2000),
-                "num_leaves": trial.suggest_int("num_leaves", 20, 150),
+                "n_estimators": trial.suggest_int("n_estimators", 100, 5000),
+                "num_leaves": trial.suggest_int("num_leaves", 20, 1500),
                 "max_depth": trial.suggest_int("max_depth", 3, 15),
+                "max_bin": trial.suggest_int("max_bin", 20, 500),
+                "bagging_freq": trial.suggest_int("bagging_freq", 1, 10),
+                "bagging_fraction": trial.suggest_float("bagging_fraction", 0.2, 1.0),
+                "feature_fraction": trial.suggest_float("feature_fraction", 0.2, 1.0),
                 "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
+                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 20, 15000),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
                 "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
@@ -289,29 +335,33 @@ class MentalHealthClassifier:
                 "min_split_gain": trial.suggest_float(
                     "min_split_gain", 1e-8, 1.0, log=True
                 ),
+                "early_stopping_round": trial.suggest_int("early_stopping_round", 20, 100),
+                "is_unbalance": True,
+                # "num_boost_round": trial.suggest_int("num_boost_round", 100, 2000),
                 "random_state": 42,
                 "objective": "binary",
                 "metric": "auc",
-                "verbose": -1,
+                # "verbose": -1,
             }
-
-            pruning_callback = optuna.integration.LightGBMPruningCallback(trial, "auc")
-            cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+            #pruning_callback = optuna.integration.LightGBMPruningCallback(trial, "auc")
             cv_results = lgb.cv(
                 param_grid,
                 lgb.Dataset(X_train, label=y_train),
-                num_boost_round=1000,
-                folds=cv,
-                early_stopping_rounds=50,
-                callbacks=[pruning_callback],
-                verbose_eval=False,
+                stratified=True,
+                nfold=7,
+              #  callbacks=[pruning_callback],
             )
+            # best_num_rounds = len(cv_results["valid auc-mean"])
+            # mean_auc = cv_results["valid auc-mean"][-1]
+            # std_auc = cv_results["valid auc-stdv"][-1]
 
-            return cv_results["auc-mean"][-1]
+            return cv_results["valid auc-mean"][-1]
 
         study = optuna.create_study(
             direction="maximize", pruner=optuna.pruners.MedianPruner()
         )
+        if initial_params:
+            study.enqueue_trial(initial_params)
         study.optimize(objective, n_trials=n_trials)
 
         print("\nBest trial:")
@@ -410,11 +460,11 @@ class MentalHealthClassifier:
         best_metrics = self.evaluate_model(X_train, y_train)
         print(f"Best model evaluation metrics:\n{best_metrics}")
         # Plot feature importance
-        self.plot_feature_importance(X_train)
-        # Plot feature interaction
-        self.plot_feature_interaction(X_train)
-        # Plot prediction explanation
-        self.plot_prediction_explanation(X_train)
+        # self.plot_feature_importance(X_train)
+        # # Plot feature interaction
+        # self.plot_feature_interaction(X_train)
+        # # Plot prediction explanation
+        # self.plot_prediction_explanation(X_train)
         # Create submission file with best model
         self.create_submission_file(X_test, test_id, filename="submission_best.csv")
         # Save best model and parameters
