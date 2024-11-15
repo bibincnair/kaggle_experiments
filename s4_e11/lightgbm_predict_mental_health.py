@@ -200,8 +200,15 @@ class MentalHealthClassifier:
         X_train[numerical_cols] = imputer.fit_transform(X_train[numerical_cols])
         X_test[numerical_cols] = imputer.transform(X_test[numerical_cols])
         return X_train, X_test
+    
+    def save_processed_data(self, X_train, y_train, X_test, x_original, y_original, train_id, test_id):
+        """Save processed data to data/s4_e11 folder"""
+        X_train.to_pickle("data/s4_e11/processed_data/X_train.pkl")
+        y_train.to_pickle("data/s4_e11/processed_data/y_train.pkl")
+        X_test.to_pickle("data/s4_e11/processed_data/X_test.pkl")
+                
 
-    def preprocess_data(self, X_train, y_train, X_test):
+    def preprocess_data(self, X_train, y_train, X_test, X_original, y_original):
         """Preprocess data"""
         # Save train and test IDs
         train_id = pd.DataFrame(X_train["id"])
