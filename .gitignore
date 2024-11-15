@@ -21,3 +21,5 @@ events.out.tfevents.*
 hparams.yaml
 *.ckpt
 *.yml
+
+.disable*
