@@ -13,7 +13,7 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer, KNNImputer
-from sklearn.experimental import enable_iterative_imputer
+from sklearn.preprocessing import LabelEncoder
 
 
 class MentalHealthClassifier:
@@ -216,6 +216,21 @@ class MentalHealthClassifier:
         # Drop 'Name' and 'id' columns
         X_train = X_train.drop(["Name", "id"], axis=1)
         X_test = X_test.drop(["Name", "id"], axis=1)
+        
+        # If original data is provided, merge it with the training data after removing 'Name' and 'id' columns
+        if X_original is not None:
+            X_original = X_original.drop(["Name"], axis=1)
+            # if y_original is categorical, encode it using LabelEncoder
+            # print count of unique values in y_train and y_original
+            if y_original.dtype == "object":
+                encoder = LabelEncoder()
+                # No as 0 and Yes as 1
+                y_original = pd.DataFrame(encoder.fit_transform(y_original), columns=["Depression"])
+            
+            print(y_train.value_counts())
+            print(y_original.value_counts())
+            X_train = pd.concat([X_train, X_original], axis=0)
+            y_train = pd.concat([y_train, y_original], axis=0)
 
         rare_sample_remover = self.RareSampleRemover()
         X_train = rare_sample_remover.fit_transform(X_train)
@@ -233,6 +248,11 @@ class MentalHealthClassifier:
 
         # Preprocess numerical columns
         X_train, X_test = self.preprocess_numerical_columns(X_train, X_test)
+        
+        # Print count of instances of "No" in X_train and y_train
+        print("Count of 'No' instances in X_train and y_train:")
+        print(X_train[X_train == "No"].count())
+        print(y_train[y_train == "No"].count())
         
         # pickle processed data to data/s4_e11 folder
         X_train.to_pickle("data/s4_e11/processed_data/X_train.pkl")
@@ -445,9 +465,14 @@ class MentalHealthClassifier:
     def run_experiment(self):
         X_train, y_train, X_test = self.load_data()
         test_id = X_test["id"]
+        
+        # Load original data
+        X_original, y_original = self.load_original_data()
+        
         # Preprocess data
-        X_train, y_train, X_test = self.preprocess_data(X_train, y_train, X_test)
+        X_train, y_train, X_test = self.preprocess_data(X_train, y_train, X_test, X_original, y_original)
         print("Finished preprocessing data.")
+        return
         # Train model
         self.train_model(X_train, y_train)
         print("Finished training model.")
