@@ -23,3 +23,8 @@ hparams.yaml
 *.yml
 
 .disable*
+
+__pycache__/
+*.html
+
+*.Identifier
