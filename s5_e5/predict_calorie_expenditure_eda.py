@@ -50,6 +50,7 @@ def basic_data_analysis(df):
     plt.figure(figsize=(12, 8))
     sns.boxplot(data=df)
     plt.title("Boxplot of Features")
+    plt.show()
     
 def target_variable_analysis(df: pd.DataFrame):
     """Analyze the target variable distribution.
@@ -67,12 +68,13 @@ def target_variable_analysis(df: pd.DataFrame):
     plt.figure(figsize=(12, 8))
     sns.histplot(df['Calories'], bins=30, kde=True)
     plt.title("Distribution of Calories Burned")
+    plt.show()
     
     # Box plot of calories burned
     plt.figure(figsize=(12, 8))
     sns.boxplot(x=df['Calories'])
     plt.title("Boxplot of Calories Burned")
-    
+    plt.show()
     # Check for skewness and kurtosis
     skewness = df['Calories'].skew()
     kurtosis = df['Calories'].kurtosis()
@@ -88,6 +90,7 @@ def target_variable_analysis(df: pd.DataFrame):
     plt.figure(figsize=(12, 8))
     sns.histplot(log_cal, bins=30, kde=True, color='orange')
     plt.title("Distribution of Log(1 + Calories Burned)")
+    plt.show()
     
     log_skew = log_cal.skew()
     log_kurt = log_cal.kurtosis()
@@ -98,6 +101,7 @@ def target_variable_analysis(df: pd.DataFrame):
     plt.figure(figsize=(6, 6))
     stats.probplot(df['Calories'], dist="norm", plot=plt)
     plt.title("Q–Q Plot of Calories Burned")
+    plt.show()
     # Log transformation
     
     #pair plot
@@ -132,4 +136,3 @@ if __name__ == "__main__":
     basic_data_analysis(train_df)
     plot_correlation_matrix(train_df)
     target_variable_analysis(train_df)
-    plt.show()
