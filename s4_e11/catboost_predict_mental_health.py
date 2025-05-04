@@ -1,23 +1,27 @@
 from datetime import datetime
 import json
-import logging
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Tuple, List, Optional
-
 import numpy as np
 import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import shap
 import optuna
-import xgboost as xgb
+from catboost import CatBoostClassifier, Pool, cv, CatBoostError
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import cross_val_score
 from sklearn.impute import KNNImputer
 from clearml import Task
+from dataclasses import dataclass
+from typing import Dict, Tuple, List, Optional, Any
+from pathlib import Path
+import logging
 
-# Configure logging
+# Configure logging to save logs to a file in logs/ directory
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("logs/s4_e11_xgboost_predict_mental_health.log"),
+        logging.FileHandler("logs/s4_e11_catboost_predict_mental_health.log"),
         logging.StreamHandler(),
     ],
 )
@@ -32,10 +36,9 @@ class Config:
     n_trials: int = 200
     cv_folds: int = 5
     random_seed: int = 42
-    model_path: str = "models/s4_e11_xgboost_model.json"
-    params_path: str = "models/s4_e11_xgboost_best_params.json"
+    model_path: str = "models/s4_e11_catboost_model.cbm"
+    params_path: str = "models/s4_e11_catboost_best_params.json"
     data_path: str = "data/s4_e11/"
-    early_stopping_rounds: int = 100
 
 
 class DataProcessor:
@@ -44,7 +47,6 @@ class DataProcessor:
     def __init__(self, config: Config):
         self.config = config
         self.categorical_features = None
-        self.numeric_features = None
 
     def load_processed_data(
         self,
@@ -72,12 +74,9 @@ class DataProcessor:
         # Handle student/professional logic
         X_train, X_test = self._handle_student_professional(X_train, X_test)
 
-        # Identify features
+        # Identify categorical features
         self.categorical_features = X_train.select_dtypes(
             include=["object"]
-        ).columns.tolist()
-        self.numeric_features = X_train.select_dtypes(
-            include=["float64", "int64"]
         ).columns.tolist()
 
         # Handle missing values
@@ -123,25 +122,20 @@ class DataProcessor:
     def _handle_missing_values(
         self, X_train: pd.DataFrame, X_test: pd.DataFrame
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Handle missing values using KNN imputation for numerical features and mode for categorical"""
+        """Handle missing values using KNN imputation for numerical features"""
         logging.info("Handling missing values")
+        numerical_features = X_train.select_dtypes(include=["float64", "int64"]).columns
 
         # KNN imputation for numerical features
         imputer = KNNImputer(n_neighbors=5)
-        X_train[self.numeric_features] = imputer.fit_transform(
-            X_train[self.numeric_features]
-        )
-        X_test[self.numeric_features] = imputer.transform(X_test[self.numeric_features])
+        X_train[numerical_features] = imputer.fit_transform(X_train[numerical_features])
+        X_test[numerical_features] = imputer.transform(X_test[numerical_features])
 
         # Mode imputation for categorical features
         for col in self.categorical_features:
             mode_value = X_train[col].mode()[0]
             X_train[col] = X_train[col].fillna(mode_value)
             X_test[col] = X_test[col].fillna(mode_value)
-
-            # Convert to categorical type for XGBoost
-            X_train[col] = X_train[col].astype("category")
-            X_test[col] = X_test[col].astype("category")
 
         return X_train, X_test
 
@@ -152,127 +146,152 @@ class ModelTrainer:
     def __init__(self, config: Config):
         self.config = config
         self.task = Task.init(
-            project_name="s4e11", task_name="xgboost_predict_mental_health"
+            project_name="s4e11", task_name="catboost_predict_mental_health"
         )
 
     def _optimize_hyperparameters(
-        self, X_train: pd.DataFrame, y_train: pd.Series
+        self, X_train: pd.DataFrame, y_train: pd.Series, categorical_features: List[str]
     ) -> Dict:
         """Optimize hyperparameters using Optuna"""
         logging.info("Optimizing hyperparameters")
 
         def objective(trial):
             params = {
-                "objective": "binary:logistic",
-                "eval_metric": ["auc", "aucpr"],
+                # Core parameters
+                "iterations": trial.suggest_int("iterations", 100, 3000),
                 "learning_rate": trial.suggest_float(
                     "learning_rate", 1e-4, 0.1, log=True
                 ),
-                "max_depth": trial.suggest_int("max_depth", 4, 10),
-                "subsample": trial.suggest_float("subsample", 0.1, 1.0),
-                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.05, 1.0),
-                "min_child_weight": trial.suggest_int("min_child_weight", 1, 1000),
-                "gamma": trial.suggest_float("gamma", 1e-8, 10.0, log=True),
-                "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
-                "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
-                "scale_pos_weight": sum(y_train == 0) / sum(y_train == 1),
-                "tree_method": "hist",
-                "random_state": self.config.random_seed,
-                "enable_categorical": True,
+                "depth": trial.suggest_int("depth", 4, 10),  # As recommended in guide
+                # Regularization
+                "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-8, 10, log=True),
+                "random_strength": trial.suggest_float(
+                    "random_strength", 1e-8, 10, log=True
+                ),
+                # Tree growing policy
+                "grow_policy": trial.suggest_categorical(
+                    "grow_policy", ["SymmetricTree", "Depthwise", "Lossguide"]
+                ),
+                # Border count (as per guide)
+                "border_count": trial.suggest_categorical("border_count", [64, 1024]),
+                # Bootstrapping
+                "bootstrap_type": trial.suggest_categorical(
+                    "bootstrap_type", ["Bayesian", "Bernoulli", "MVS"]
+                ),
+                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 1000),
+                "colsample_bylevel": trial.suggest_float(
+                    "colsample_bylevel", 0.05, 1.0
+                ),
+                # Fixed parameters
+                "loss_function": "Logloss",
+                "eval_metric": "AUC",
+                "verbose": False,
+                "auto_class_weights": trial.suggest_categorical(
+                    "auto_class_weights", ["None", "Balanced", "SqrtBalanced"]
+                ),
+                "random_seed": self.config.random_seed,
             }
 
+            # Conditional parameters based on bootstrap_type
+            if params["bootstrap_type"] == "Bayesian":
+                params["bagging_temperature"] = trial.suggest_float(
+                    "bagging_temperature", 0.0, 10.0
+                )
+            elif params["bootstrap_type"] == "Bernoulli":
+                params["subsample"] = trial.suggest_float("subsample", 0.1, 1.0)
+
+            # Conditional parameters for grow_policy
+            if params["grow_policy"] == "Lossguide":
+                params["max_leaves"] = trial.suggest_int("max_leaves", 8, 64)
+
             try:
-                cv_results = xgb.cv(
-                    params,
-                    xgb.DMatrix(X_train, label=y_train, enable_categorical=True),
-                    num_boost_round=3000,
-                    early_stopping_rounds=self.config.early_stopping_rounds,
-                    nfold=self.config.cv_folds,
-                    stratified=True,
-                    shuffle=True,
-                    seed=self.config.random_seed,
-                    verbose_eval=False,
+                train_pool = Pool(
+                    data=X_train, label=y_train, cat_features=categorical_features
                 )
 
-                mean_auc = cv_results["test-auc-mean"].max()
-                mean_aucpr = cv_results["test-aucpr-mean"].max()
-                return 0.4 * mean_auc + 0.6 * mean_aucpr
+                cv_results = cv(
+                    pool=train_pool,
+                    params=params,
+                    fold_count=self.config.cv_folds,
+                    stratified=True,
+                    shuffle=True,
+                    early_stopping_rounds=100,
+                    seed=self.config.random_seed,
+                    logging_level="Verbose",
+                )
 
+                return np.mean(cv_results["test-AUC-mean"])
             except Exception as e:
                 raise optuna.TrialPruned()
 
         study = optuna.create_study(
             direction="maximize", pruner=optuna.pruners.MedianPruner(n_startup_trials=5)
         )
-
-        # Load and enqueue previous best parameters if available
-        try:
-            with open(self.config.params_path, "r") as f:
-                best_params = json.load(f)
-                study.enqueue_trial(best_params)
-        except FileNotFoundError:
-            pass
-
+        with open(Config().params_path, "r") as f:
+            best_params = json.load(f)  
+        study.enqueue_trial(best_params)
         study.optimize(objective, n_trials=self.config.n_trials, n_jobs=4)
 
-        best_params = study.best_params
-        # Add number of rounds from early stopping
-        cv_results = xgb.cv(
-            best_params,
-            xgb.DMatrix(X_train, label=y_train, enable_categorical=True),
-            num_boost_round=3000,
-            early_stopping_rounds=self.config.early_stopping_rounds,
-            nfold=self.config.cv_folds,
-            stratified=True,
-        )
-        best_params["n_estimators"] = len(cv_results)
+        return study.best_params
 
-        return best_params
-
-    def train(self, X_train: pd.DataFrame, y_train: pd.Series) -> xgb.Booster:
+    def train(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        categorical_features: Optional[List[str]] = None,
+    ) -> CatBoostClassifier:
         """Train the model with either default or optimized parameters"""
         logging.info("Training the model")
-
         if self.config.use_processed_data:
             with open(self.config.params_path, "r") as f:
                 params = json.load(f)
         else:
-            params = self._optimize_hyperparameters(X_train, y_train)
+            params = self._optimize_hyperparameters(
+                X_train, y_train, categorical_features
+            )
+            # Save best parameters
             with open(self.config.params_path, "w") as f:
                 json.dump(params, f)
 
-        dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=True)
+        model = CatBoostClassifier(**params)
         logging.info(f"Training with parameters: {params}")
-        model = xgb.train(params, dtrain, num_boost_round=params["n_estimators"])
+        logging.info(f"Categorical features: {categorical_features}")
+        model.fit(X_train, y_train, cat_features=categorical_features, verbose=True)
 
         return model
 
     def validate(
-        self, X_train: pd.DataFrame, y_train: pd.Series, params: Dict
-    ) -> Tuple[float, xgb.Booster]:
-        """Validate the model using cross-validation"""
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        categorical_features: List[str],
+        params: Dict,
+    ) -> Tuple[float, CatBoostClassifier]:
+        """Load the best parameters and validate the model by training on the entire dataset and cv"""
+        
         logging.info("Validating the model")
-
-        dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=True)
-        cv_results = xgb.cv(
-            params,
-            dtrain,
-            num_boost_round=params["n_estimators"],
-            nfold=self.config.cv_folds,
+        # config does not have "loss_function": "Logloss" and "eval_metric": "AUC", add them
+        params["loss_function"] = "Logloss"
+        params["eval_metric"] = "AUC"
+        
+        model = CatBoostClassifier(**params)
+        model.fit(X_train, y_train, cat_features=categorical_features, verbose=True)
+        mean_auc = cv(
+            Pool(data=X_train, label=y_train, cat_features=categorical_features),
+            params=params,
+            fold_count=self.config.cv_folds,
             stratified=True,
             shuffle=True,
+            # early_stopping_rounds=100,
             seed=self.config.random_seed,
-        )
-
-        mean_auc = cv_results["test-auc-mean"].mean()
-
-        with open("logs/s4_e11_xgboost_final_cv_score.log", "a") as f:
+            logging_level="Silent",
+        )["test-AUC-mean"].mean()
+        # Append current mean auc value to logs/s4_e11_catboost_final_cv_score.log in format <date> <time> - INFO - Mean AUC: <mean_auc>
+        with open("logs/s4_e11_catboost_final_cv_score.log", "a") as f:
             f.write("\n")
             date_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"{date_time} - INFO - Mean AUC: {mean_auc}\n")
             f.write("\n")
-
-        model = xgb.train(params, dtrain, num_boost_round=params["n_estimators"])
         return mean_auc, model
 
 
@@ -281,27 +300,30 @@ def main():
     data_processor = DataProcessor(config)
     model_trainer = ModelTrainer(config)
 
+    # Load data
     if config.use_processed_data:
         X_train, y_train, X_test, test_id = data_processor.load_processed_data()
+        categorical_features = None  # Already processed
     else:
         X_train, y_train, X_test, test_id = data_processor.load_raw_data()
+        categorical_features = data_processor.categorical_features
 
     if config.run_validation:
+        # Validate model
         mean_auc, model = model_trainer.validate(
-            X_train, y_train, json.load(open(config.params_path))
+            X_train, y_train, categorical_features, json.load(open(config.params_path))
         )
         logging.info(f"Mean AUC: {mean_auc}")
     else:
-        model = model_trainer.train(X_train, y_train)
-        model.save_model(config.model_path)
+        # Train model
+        model = model_trainer.train(X_train, y_train, categorical_features)
 
-    dtest = xgb.DMatrix(X_test, enable_categorical=True)
-    y_pred = model.predict(dtest)
-    y_pred_binary = (y_pred > 0.5).astype(int)
+    # Generate predictions
+    y_pred = model.predict(X_test)
 
-    Path("submissions/s4_e11").mkdir(parents=True, exist_ok=True)
-    submission = pd.DataFrame({"id": test_id, "Depression": y_pred_binary})
-    submission.to_csv("submissions/s4_e11/submission.csv", index=False)
+    # Create submission
+    submission = pd.DataFrame({"id": test_id, "Depression": y_pred.astype(int)})
+    submission.to_csv("submission.csv", index=False)
 
 
 if __name__ == "__main__":
