@@ -1,12 +1,12 @@
 # --- IMPORTS ---
-# Remove or comment out lightgbm import
-# import lightgbm as lgb
-import xgboost as xgb  # Import XGBoost
+# Add featuretools import
+import featuretools as ft
+import xgboost as xgb  # Or import lightgbm as lgb
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import KFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_squared_log_error
 
@@ -18,13 +18,15 @@ import optuna
 from optuna import create_study
 from optuna.samplers import TPESampler
 from optuna.pruners import MedianPruner
-
-# from optuna.visualization import plot_optimization_history, plot_param_importances
+from optuna.visualization import plot_optimization_history, plot_param_importances
 
 import json
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings(
+    "ignore", category=FutureWarning
+)  # Featuretools can sometimes raise these
 
 
 # --- Data Loading (Unchanged) ---
@@ -34,6 +36,9 @@ def load_data():
     """
     train_path = "data/s5_e5/train.csv"
     test_path = "data/s5_e5/test.csv"
+    # Fallback paths if needed
+    # train_path = "../input/playground-series-s4e5/train.csv"
+    # test_path = "../input/playground-series-s4e5/test.csv"
 
     train_df = pd.read_csv(train_path)
     test_df = pd.read_csv(test_path)
@@ -48,6 +53,7 @@ def load_data():
 def engineer_features(
     df, add_bmi=True, use_bmi_only=True, add_log_duration=True, add_temp_elevation=True
 ):
+    # (Keep the function exactly as it was in the previous step)
     df_eng = df.copy()
 
     if add_temp_elevation:
@@ -70,8 +76,10 @@ def engineer_features(
     return df_eng
 
 
+# --- Configuration (Add XGBoost specific defaults if needed) ---
 @dataclass
 class Config:
+    # XGBoost specific parameters (defaults adjusted)
     iterations: int = 1000  # Mapped to n_estimators
     learning_rate: float = 0.05
     depth: int = 6  # Mapped to max_depth (XGBoost default is 6)
@@ -109,6 +117,92 @@ class Config:
                 print(f"Error loading config from {path}: {e}. Using defaults.")
                 pass
         return cls()
+
+
+# --- NEW: Featuretools DFS Function ---
+def run_featuretools_dfs(
+    df, entity_id="exercises", index_col="id", target_entity="exercises"
+):
+    """
+    Applies Deep Feature Synthesis using Featuretools on a single dataframe.
+    Focuses on transformation primitives as there are no relationships.
+    """
+    print(f"\n--- Running Featuretools DFS on entity '{entity_id}' ---")
+    df_ft = df.copy()
+
+    # Ensure index_col is unique for make_index=False
+    if not df_ft[index_col].is_unique:
+        print(
+            f"Warning: Index column '{index_col}' is not unique. Resetting index for Featuretools."
+        )
+        df_ft.reset_index(drop=True, inplace=True)
+        # If we reset, we can't use the original 'id' as the FT index easily unless it matches the new range.
+        # Let's use make_index=True instead for simplicity if id isn't unique or not the actual index.
+        # However, the provided data likely has unique IDs. We assume 'id' is unique for now.
+        # If 'id' IS the index already, skip make_index.
+        # If 'id' is a COLUMN and unique, use it as index parameter.
+
+    # Create an EntitySet
+    es = ft.EntitySet(id="calorie_data")
+
+    # Add the dataframe as an entity.
+    # Use 'id' column as the index for the entity.
+    # Specify numeric/categorical types if needed (often inferred well)
+    # Make sure all intended features are numeric or categorical first.
+    # Example: Convert Sex before adding if needed (though LabelEncoder handles it later)
+    numeric_cols = df_ft.select_dtypes(include=np.number).columns.tolist()
+    variable_types = {
+        col: ft.variable_types.Numeric for col in numeric_cols if col != index_col
+    }
+    # Add other types if needed, e.g., categorical
+
+    es = es.add_dataframe(
+        dataframe_name=entity_id,
+        dataframe=df_ft,
+        index=index_col,  # Specify the column to use as the unique identifier
+        # make_index=True, # Use this if you DON'T have a unique ID column already
+        variable_types=variable_types,
+    )
+
+    print(f"EntitySet created with entity '{entity_id}'.")
+    print(f"Available features for DFS: {list(df_ft.columns)}")
+
+    # Define primitives - Focus on transformations for a single table
+    # Can add more from ft.list_primitives()
+    trans_primitives = [
+        "add_numeric",
+        "subtract_numeric",
+        "multiply_numeric",
+        "divide_numeric",
+        "absolute",
+        # "percentile", # Can be useful
+        # Add others as needed, avoid time-based ones if no timestamp
+    ]
+
+    # Run Deep Feature Synthesis
+    # max_depth=1 is sufficient for transformation primitives on a single table
+    print(f"Running DFS with primitives: {trans_primitives}")
+    try:
+        feature_matrix, feature_defs = ft.dfs(
+            entityset=es,
+            target_dataframe_name=target_entity,
+            agg_primitives=[],  # No aggregations without relationships
+            trans_primitives=trans_primitives,
+            max_depth=1,
+            verbose=1,
+            n_jobs=1,  # Can increase if needed, but might use lots of memory
+        )
+        print(f"DFS completed. Generated {feature_matrix.shape[1]} features.")
+        # print("Generated feature names:", feature_defs) # Can be very long
+    except Exception as e:
+        print(f"Error during Featuretools DFS: {e}")
+        print("Returning original dataframe.")
+        return df  # Return original df on error
+
+    # Featuretools might change dtypes, e.g., int to float, ensure consistency if needed
+    # feature_matrix = feature_matrix.astype({col: df_ft[col].dtype for col in df.columns if col in feature_matrix.columns})
+
+    return feature_matrix
 
 
 # --- XGBoost Training Function ---
@@ -355,14 +449,14 @@ def tune_optuna_xgb(  # Renamed function
         # --- Sample XGBoost Hyperparameters ---
         params = {
             "n_estimators": trial.suggest_int(
-                "iterations", 500, 20000, step=500
+                "iterations", 500, 5000, step=500
             ),  # Adjusted range maybe
-            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.2, log=True),
-            "max_depth": trial.suggest_int("depth", 3, 16),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "max_depth": trial.suggest_int("depth", 3, 10),
             "reg_lambda": trial.suggest_float("l2_leaf_reg", 1e-4, 10.0, log=True),
             "gamma": trial.suggest_float("gamma", 1e-4, 1.0, log=True),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.05, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "objective": base_config.loss_function,
             "random_state": base_config.random_seed,
             "tree_method": actual_tree_method,  # Use determined method
@@ -445,76 +539,164 @@ def tune_optuna_xgb(  # Renamed function
     return Config(**final_config_dict)
 
 
-# --- Main Execution Block (Modified for XGBoost) ---
+# --- Main Execution Block (Modified to include Featuretools) ---
 if __name__ == "__main__":
     # --- Configuration ---
-    RUN_OPTUNA = True
-    N_OPTUNA_TRIALS = 30  # Example trial count
-    SUBMISSION_FILENAME = "data/s5_e5/submission_xgb.csv"  # New name
-    CONFIG_SAVE_PATH = "data/s5_e5/xgb_best_config.json"  # New name
+    RUN_OPTUNA = False  # Keep False initially to test FT integration
+    N_OPTUNA_TRIALS = 30
+    RUN_FEATURETOOLS = True  # Flag to control Featuretools step
+    SUBMISSION_FILENAME = "data/s5_e5/submission_xgb_ft.csv"  # New name
+    CONFIG_SAVE_PATH = "data/s5_e5/xgb_best_config_ft.json"  # New name
 
     # 1. Load Raw Data
     print("Loading data...")
     train_df_raw, test_df_raw = load_data()
     print(f"Loaded Train: {train_df_raw.shape}, Test: {test_df_raw.shape}")
 
-    # 2. Define Feature Engineering Strategy (using simplified from previous step)
+    # 2. Define Manual Feature Engineering Strategy (Optional - run before FT)
     feature_eng_config = {
         "add_bmi": True,
         "use_bmi_only": True,
         "add_log_duration": False,
         "add_temp_elevation": False,
     }
-    print("Selected Feature Engineering Strategy:", feature_eng_config)
-
-    # 3. Apply Feature Engineering
-    print("Applying feature engineering...")
-    train_df_eng = engineer_features(train_df_raw, **feature_eng_config)
-    test_df_eng = engineer_features(test_df_raw, **feature_eng_config)
+    print("Selected Manual Feature Engineering Strategy:", feature_eng_config)
+    train_df_manual_eng = engineer_features(train_df_raw, **feature_eng_config)
+    test_df_manual_eng = engineer_features(test_df_raw, **feature_eng_config)
     print(
-        f"Engineered Train shape: {train_df_eng.shape}, Test shape: {test_df_eng.shape}"
+        f"After Manual Eng - Train: {train_df_manual_eng.shape}, Test: {test_df_manual_eng.shape}"
     )
 
-    # 4. Define Final Feature List (same logic as before)
-    features_to_use = ["Sex", "Age", "Duration", "Heart_Rate", "Body_Temp"]
-    if feature_eng_config.get("add_bmi"):
-        features_to_use.append("BMI")
-    features_to_use = [f for f in features_to_use if f in train_df_eng.columns]
-    print("Final features for model:", features_to_use)
+    # --- 3. Apply Featuretools DFS (Conditional) ---
+    if RUN_FEATURETOOLS:
+        # Important: Apply DFS to both train and test using the same primitives
+        # Need to ensure consistent columns before applying DFS
+        train_cols_before_ft = set(train_df_manual_eng.columns)
+        test_cols_before_ft = set(test_df_manual_eng.columns)
+        common_cols = list(train_cols_before_ft.intersection(test_cols_before_ft))
+        target_col = "Calories"  # Assuming target is only in train before FT
+        if target_col in common_cols:
+            common_cols.remove(target_col)  # Don't use target in test
 
-    # 5. Hyperparameter Tuning (Optional) - Using XGBoost Tuner
-    base_config = Config()  # Get default XGBoost config
-    if RUN_OPTUNA:
-        best_config = tune_optuna_xgb(  # Call XGBoost tuner
-            raw_train_df=train_df_raw,
+        # Run DFS on Training Data
+        train_df_ft = run_featuretools_dfs(
+            train_df_manual_eng, entity_id="exercises_train", index_col="id"
+        )
+
+        # Run DFS on Test Data (using only common columns from train before FT)
+        # Ensure test data has the 'id' column needed for indexing
+        test_df_ft = run_featuretools_dfs(
+            test_df_manual_eng[common_cols + ["id"]],
+            entity_id="exercises_test",
+            index_col="id",
+        )
+
+        # Align columns after DFS - crucial! Test might not generate all features if data distribution differs.
+        train_cols_after_ft = set(train_df_ft.columns)
+        test_cols_after_ft = set(test_df_ft.columns)
+
+        # Features to use are those generated in train (excluding target)
+        features_generated = list(train_cols_after_ft)
+        if target_col in features_generated:
+            features_generated.remove(target_col)
+        if "id" in features_generated:
+            features_generated.remove("id")  # Don't use ID as feature
+
+        # Ensure test set has all columns from train, fill missing with 0 or median/mean if appropriate
+        print("Aligning columns after DFS...")
+        missing_in_test = list(set(features_generated) - test_cols_after_ft)
+        for col in missing_in_test:
+            print(f"Adding missing column '{col}' to test set (filling with 0).")
+            test_df_ft[col] = 0
+
+        missing_in_train = list(
+            test_cols_after_ft - set(features_generated) - {"id"}
+        )  # Should ideally be empty
+        if missing_in_train:
+            print(
+                f"Warning: Columns in test but not train after FT: {missing_in_train}. Dropping from test."
+            )
+            test_df_ft = test_df_ft.drop(columns=missing_in_train)
+
+        # Ensure order is the same
+        test_df_ft = test_df_ft[
+            train_df_ft[features_generated].columns
+        ]  # Match train column order (excluding target/id)
+
+        train_df_final = train_df_ft
+        test_df_final = test_df_ft
+        features_to_use = features_generated  # Use all features generated by FT (and original ones it kept)
+
+    else:
+        print("Skipping Featuretools DFS.")
+        train_df_final = train_df_manual_eng
+        test_df_final = test_df_manual_eng
+        # Define features based on manual engineering only (as in previous step)
+        features_to_use = ["Sex", "Age", "Duration", "Heart_Rate", "Body_Temp"]
+        if feature_eng_config.get("add_bmi"):
+            features_to_use.append("BMI")
+        features_to_use = [f for f in features_to_use if f in train_df_final.columns]
+
+    print(f"\nFinal features count for model: {len(features_to_use)}")
+    # print("Final features for model:", features_to_use) # Can be very long list
+
+    # 4. Hyperparameter Tuning (Optional - run on the final feature set)
+    base_config = Config()
+    if RUN_OPTUNA and RUN_FEATURETOOLS:
+        print("\nRunning Optuna on data with Featuretools features...")
+        # We need to pass the *final* engineered data to Optuna if FT was run
+        # Modifying tune_optuna_xgb to accept pre-engineered data might be simpler here
+        # Or, ensure Optuna objective replicates *both* manual + FT steps (more complex)
+        # Let's assume for now we tune *after* deciding whether to use FT features.
+        # If RUN_OPTUNA is True, run it on train_df_final (which includes FT features if RUN_FEATURETOOLS was True)
+        # This requires modifying tune_optuna_xgb slightly to accept engineered data directly, or adjusting its internal logic.
+        # For simplicity, we'll skip Optuna re-run in this example if FT is enabled,
+        # assuming we'd use a config tuned previously or the default.
+        print(
+            "Optuna tuning with Featuretools features enabled requires modification to tune_optuna function - Skipping tuning for now."
+        )
+        best_config = base_config  # Use default or load existing
+        # best_config = Config.load(CONFIG_SAVE_PATH) # Load if previously saved
+    elif RUN_OPTUNA and not RUN_FEATURETOOLS:
+        # Run Optuna as before using tune_optuna_xgb which does manual eng internally
+        best_config = tune_optuna_xgb(
+            raw_train_df=train_df_raw,  # Pass raw for Optuna's internal FE
             feature_engineering_config=feature_eng_config,
             base_config=base_config,
             n_trials=N_OPTUNA_TRIALS,
         )
-        print(f"Saving best XGBoost config found by Optuna to {CONFIG_SAVE_PATH}")
-        with open(CONFIG_SAVE_PATH, "w") as f:
+        print(
+            f"Saving best XGBoost config (no FT) found by Optuna to {CONFIG_SAVE_PATH.replace('_ft','')}"
+        )
+        with open(CONFIG_SAVE_PATH.replace("_ft", ""), "w") as f:
             json.dump(asdict(best_config), f, indent=4)
-    else:
-        print("Skipping Optuna tuning. Loading or using default XGBoost config.")
-        # Try loading previously saved config
-        best_config = Config.load(CONFIG_SAVE_PATH)  # Use load method
 
-    # 6. Train Final Model using Cross-Validation - Using XGBoost Trainer
-    print("\nTraining final XGBoost model with selected features and configuration...")
-    models, label_encoder, oof_score = train_xgboost_cv(  # Call XGBoost trainer
-        train_df_engineered=train_df_eng,
-        features_to_use=features_to_use,
+    else:
+        print("Skipping Optuna tuning.")
+        best_config = Config.load(
+            CONFIG_SAVE_PATH
+            if RUN_FEATURETOOLS
+            else CONFIG_SAVE_PATH.replace("_ft", "")
+        )
+
+    # 5. Train Final Model using Cross-Validation
+    print("\nTraining final XGBoost model...")
+    # Pass the final dataframes (potentially with FT features)
+    models, label_encoder, oof_score = train_xgboost_cv(
+        train_df_engineered=train_df_final,  # Use final train df
+        features_to_use=features_to_use,  # Use final feature list
         config=best_config,
     )
-    print(f"Achieved OOF RMSLE with XGBoost: {oof_score:.5f}")
+    print(f"Achieved OOF RMSLE: {oof_score:.5f}")
 
-    # 7. Make Submission (Function is compatible)
+    # 6. Make Submission
     print("\nGenerating submission file...")
+    # Pass the final test dataframe
     make_submission(
         models=models,
         le=label_encoder,
-        test_df_engineered=test_df_eng,
-        features_to_use=features_to_use,
+        test_df_engineered=test_df_final,  # Use final test df
+        features_to_use=features_to_use,  # Use final feature list
         submission_path=SUBMISSION_FILENAME,
     )
 

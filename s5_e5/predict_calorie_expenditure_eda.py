@@ -1,10 +1,8 @@
 import seaborn as sns
+import matplotlib
 import matplotlib.pyplot as plt
-
 import pandas as pd
 import numpy as np
-
-# import sklearn with encoding functions
 from sklearn.preprocessing import LabelEncoder
 
 data_path = "data/s5_e5/"

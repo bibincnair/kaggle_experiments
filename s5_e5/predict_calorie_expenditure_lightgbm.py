@@ -184,10 +184,7 @@ def train_lightgbm_cv(train_df_engineered, features_to_use, config):
 
     # Calculate overall OOF RMSLE
     overall_oof_rmsle = np.sqrt(
-        mean_squared_log_error(np.expm1(oof_true_log), np.expm1(oof_preds_log))
-    )
-    print("-" * 30)
-    print(f"Overall OOF RMSLE: {overall_oof_rmsle:.5f}")
+^^    print(f"Overall OOF RMSLE: {overall_oof_rmsle:.5f}")
     print(
         f"Mean Fold RMSLE:   {np.mean(fold_rmsle_scores):.5f} ± {np.std(fold_rmsle_scores):.5f}"
     )
@@ -320,9 +317,9 @@ def tune_optuna(
             "learning_rate": trial.suggest_float(
                 "learning_rate", 0.005, 0.05, log=True
             ),  # Adjusted range
-            "max_depth": trial.suggest_int("depth", 4, 12),  # Adjusted range
+            "max_depth": trial.suggest_int("depth", 4, 16),  # Adjusted range
             "num_leaves": trial.suggest_int(
-                "num_leaves", 10, 70
+                "num_leaves", 10, 1000
             ),  # Relative to max_depth
             "reg_lambda": trial.suggest_float(
                 "l2_leaf_reg", 1e-6, 10.0, log=True
@@ -412,7 +409,7 @@ def tune_optuna(
 if __name__ == "__main__":
     # --- Configuration ---
     RUN_OPTUNA = True # Set to True to run hyperparameter tuning
-    N_OPTUNA_TRIALS = 20 # Increase for serious tuning
+    N_OPTUNA_TRIALS = 50 # Increase for serious tuning
     SUBMISSION_FILENAME = "data/s5_e5/submission_simplified_features.csv" # New name
     CONFIG_SAVE_PATH = "data/s5_e5/lgbm_best_config_simplified.json" # New name
 
