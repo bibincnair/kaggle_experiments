@@ -1,1 +1,1 @@
-### EDA on kaggle store forcasting.
+### Solutions on kaggle competitions.
